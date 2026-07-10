@@ -68,8 +68,8 @@ class TransferControllerTest {
     }
 
     @Test
-    @DisplayName("chave nova retorna 201 com header Location")
-    void chaveNova_retorna201() throws Exception {
+    @DisplayName("chave nova retorna 202 Accepted com header Location")
+    void chaveNova_retorna202() throws Exception {
         when(transferService.transfer(eq("k1"), any(), any(), any()))
                 .thenReturn(new TransferResult(transferComId(), true));
 
@@ -77,7 +77,7 @@ class TransferControllerTest {
                         .header("Idempotency-Key", "k1")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(jsonBody()))
-                .andExpect(status().isCreated())
+                .andExpect(status().isAccepted())
                 .andExpect(header().exists("Location"));
     }
 

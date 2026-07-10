@@ -5,10 +5,13 @@ import br.com.transferhub.transferapi.account.AccountRepository;
 import br.com.transferhub.transferapi.common.exception.AccountNotFoundException;
 import br.com.transferhub.transferapi.common.exception.SameAccountException;
 import br.com.transferhub.transferapi.common.exception.TransferNotFoundException;
+import br.com.transferhub.transferapi.messaging.TransferRequested;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.time.OffsetDateTime;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -17,16 +20,24 @@ public class TransferService {
 
     private final AccountRepository accountRepository;
     private final TransferRepository transferRepository;
+    private final ApplicationEventPublisher eventPublisher;
 
-    public TransferService(AccountRepository accountRepository, TransferRepository transferRepository) {
+    public TransferService(AccountRepository accountRepository,
+                           TransferRepository transferRepository,
+                           ApplicationEventPublisher eventPublisher) {
         this.accountRepository = accountRepository;
         this.transferRepository = transferRepository;
+        this.eventPublisher = eventPublisher;
     }
 
     /**
-     * Transferência SÍNCRONA e IDEMPOTENTE: débito, crédito e registro numa ÚNICA
-     * transação. Ou tudo acontece, ou nada.
-     * (Na Etapa 5 isso quebra: o crédito sai daqui e vira evento assíncrono.)
+     * Transferência ASSÍNCRONA e IDEMPOTENTE. Nesta transação:
+     *   1. debita a origem (o dinheiro sai agora e fica "reservado");
+     *   2. grava a Transfer como PENDING.
+     * O crédito no destino NÃO acontece aqui — depende da liquidação aprovar
+     * (settlement-worker) e do transfer-api consumir TransferSettled (Etapa 7).
+     *
+     * O evento TransferRequested é publicado APÓS o commit (ver TransferEventPublisher).
      */
     @Transactional
     public TransferResult transfer(String idempotencyKey, UUID sourceId, UUID targetId, BigDecimal amount) {
@@ -41,25 +52,28 @@ public class TransferService {
             throw new SameAccountException();
         }
 
-        // findById carrega as contas na sessão do Hibernate; elas ficam "managed".
+        // Origem: carregada (managed) para debitar. Destino: só validamos que
+        // existe — não o creditamos aqui (isso é assíncrono, Etapa 7).
         Account source = accountRepository.findById(sourceId)
                 .orElseThrow(() -> new AccountNotFoundException(sourceId));
-        Account target = accountRepository.findById(targetId)
-                .orElseThrow(() -> new AccountNotFoundException(targetId));
+        if (!accountRepository.existsById(targetId)) {
+            throw new AccountNotFoundException(targetId);
+        }
 
-        // As invariantes moram no domínio: debit() lança se saldo insuficiente
-        // ou valor inválido, abortando a transação inteira (rollback).
+        // Invariante no domínio: debit() lança se saldo insuficiente/valor inválido,
+        // abortando a transação (rollback). O dirty checking emite o UPDATE com o
+        // @Version (optimistic lock) no commit.
         source.debit(amount);
-        target.credit(amount);
 
-        // Não preciso chamar save() nas contas: por serem entidades managed, o
-        // dirty checking do Hibernate detecta a mudança de saldo e emite o UPDATE
-        // no commit — com a cláusula de @Version (optimistic lock). Se outra
-        // transação concorrente tiver alterado a mesma conta, o commit falha com
-        // OptimisticLockException e nada é persistido.
-        Transfer transfer = new Transfer(sourceId, targetId, amount, idempotencyKey);
-        transfer.complete(); // síncrono: já nasce e conclui na mesma transação
-        return new TransferResult(transferRepository.save(transfer), true);
+        Transfer transfer = new Transfer(sourceId, targetId, amount, idempotencyKey); // fica PENDING
+        Transfer saved = transferRepository.save(transfer);
+
+        // Evento de APLICAÇÃO (in-process). O envio real ao RabbitMQ ocorre só
+        // depois do commit desta transação (@TransactionalEventListener AFTER_COMMIT).
+        eventPublisher.publishEvent(new TransferRequested(
+                saved.getId(), sourceId, targetId, amount, OffsetDateTime.now()));
+
+        return new TransferResult(saved, true);
     }
 
     @Transactional(readOnly = true)

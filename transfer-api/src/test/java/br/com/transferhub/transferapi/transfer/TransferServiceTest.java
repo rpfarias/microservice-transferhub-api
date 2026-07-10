@@ -5,12 +5,14 @@ import br.com.transferhub.transferapi.account.AccountRepository;
 import br.com.transferhub.transferapi.common.exception.AccountNotFoundException;
 import br.com.transferhub.transferapi.common.exception.InsufficientBalanceException;
 import br.com.transferhub.transferapi.common.exception.SameAccountException;
+import br.com.transferhub.transferapi.messaging.TransferRequested;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.context.ApplicationEventPublisher;
 
 import java.math.BigDecimal;
 import java.util.Optional;
@@ -24,9 +26,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * Teste UNITÁRIO do service com Mockito: os repositórios são mocks, então não
- * há banco. Testamos a orquestração — incluindo a idempotência e o que NÃO deve
- * ser salvo em caso de erro.
+ * Teste UNITÁRIO do service com Mockito (sem banco). Cobre idempotência, validações
+ * e — a partir da Etapa 5 — que a transferência fica PENDING e um evento
+ * TransferRequested é publicado (o crédito no destino NÃO acontece mais aqui).
  */
 @ExtendWith(MockitoExtension.class)
 class TransferServiceTest {
@@ -36,6 +38,9 @@ class TransferServiceTest {
 
     @Mock
     TransferRepository transferRepository;
+
+    @Mock
+    ApplicationEventPublisher eventPublisher;
 
     @InjectMocks
     TransferService service;
@@ -47,14 +52,14 @@ class TransferServiceTest {
     private Account contaCom(String saldo) {
         Account conta = new Account("00000000000", "Titular");
         BigDecimal valor = new BigDecimal(saldo);
-        if (valor.signum() > 0) { // credit() rejeita zero/negativo; conta nova já nasce com saldo 0
+        if (valor.signum() > 0) {
             conta.credit(valor);
         }
         return conta;
     }
 
     @Test
-    @DisplayName("chave de idempotência já existente devolve a anterior sem criar nova")
+    @DisplayName("chave de idempotência já existente devolve a anterior sem criar nem publicar")
     void chaveExistente_devolveExistenteSemCriar() {
         Transfer existente = new Transfer(sourceId, targetId, new BigDecimal("10.00"), key);
         when(transferRepository.findByIdempotencyKey(key)).thenReturn(Optional.of(existente));
@@ -63,9 +68,9 @@ class TransferServiceTest {
 
         assertThat(result.created()).isFalse();
         assertThat(result.transfer()).isSameAs(existente);
-        // Nem toca nas contas, nem salva de novo.
         verify(accountRepository, never()).findById(any());
         verify(transferRepository, never()).save(any());
+        verify(eventPublisher, never()).publishEvent(any());
     }
 
     @Test
@@ -77,10 +82,11 @@ class TransferServiceTest {
                 .isThrownBy(() -> service.transfer(key, sourceId, sourceId, new BigDecimal("10.00")));
 
         verify(transferRepository, never()).save(any());
+        verify(eventPublisher, never()).publishEvent(any());
     }
 
     @Test
-    @DisplayName("conta de origem inexistente lança e não persiste nada")
+    @DisplayName("conta de origem inexistente lança e não persiste nem publica")
     void origemInexistente_lanca() {
         when(transferRepository.findByIdempotencyKey(key)).thenReturn(Optional.empty());
         when(accountRepository.findById(sourceId)).thenReturn(Optional.empty());
@@ -89,53 +95,56 @@ class TransferServiceTest {
                 .isThrownBy(() -> service.transfer(key, sourceId, targetId, new BigDecimal("10.00")));
 
         verify(transferRepository, never()).save(any());
+        verify(eventPublisher, never()).publishEvent(any());
     }
 
     @Test
-    @DisplayName("conta de destino inexistente lança e não persiste nada")
+    @DisplayName("conta de destino inexistente lança e não persiste nem publica")
     void destinoInexistente_lanca() {
         when(transferRepository.findByIdempotencyKey(key)).thenReturn(Optional.empty());
         when(accountRepository.findById(sourceId)).thenReturn(Optional.of(contaCom("100.00")));
-        when(accountRepository.findById(targetId)).thenReturn(Optional.empty());
+        when(accountRepository.existsById(targetId)).thenReturn(false);
 
         assertThatExceptionOfType(AccountNotFoundException.class)
                 .isThrownBy(() -> service.transfer(key, sourceId, targetId, new BigDecimal("10.00")));
 
         verify(transferRepository, never()).save(any());
+        verify(eventPublisher, never()).publishEvent(any());
     }
 
     @Test
-    @DisplayName("saldo insuficiente aborta e não persiste a transferência")
+    @DisplayName("saldo insuficiente aborta e não persiste nem publica")
     void saldoInsuficiente_naoPersiste() {
         when(transferRepository.findByIdempotencyKey(key)).thenReturn(Optional.empty());
         when(accountRepository.findById(sourceId)).thenReturn(Optional.of(contaCom("50.00")));
-        when(accountRepository.findById(targetId)).thenReturn(Optional.of(contaCom("0.00")));
+        when(accountRepository.existsById(targetId)).thenReturn(true);
 
         assertThatExceptionOfType(InsufficientBalanceException.class)
                 .isThrownBy(() -> service.transfer(key, sourceId, targetId, new BigDecimal("500.00")));
 
         verify(transferRepository, never()).save(any());
+        verify(eventPublisher, never()).publishEvent(any());
     }
 
     @Test
-    @DisplayName("transferência válida cria, debita, credita e marca COMPLETED")
-    void transferenciaValida_criaCompleted() {
+    @DisplayName("transferência válida debita a origem, fica PENDING e publica TransferRequested")
+    void transferenciaValida_debitaEPublica() {
         Account origem = contaCom("1000.00");
-        Account destino = contaCom("0.00");
         when(transferRepository.findByIdempotencyKey(key)).thenReturn(Optional.empty());
         when(accountRepository.findById(sourceId)).thenReturn(Optional.of(origem));
-        when(accountRepository.findById(targetId)).thenReturn(Optional.of(destino));
+        when(accountRepository.existsById(targetId)).thenReturn(true);
         when(transferRepository.save(any(Transfer.class))).thenAnswer(inv -> inv.getArgument(0));
 
         TransferResult result = service.transfer(key, sourceId, targetId, new BigDecimal("300.00"));
 
         assertThat(result.created()).isTrue();
-        assertThat(result.transfer().getStatus()).isEqualTo(TransferStatus.COMPLETED);
+        // Assíncrono: a transferência NÃO é COMPLETED aqui, fica PENDING.
+        assertThat(result.transfer().getStatus()).isEqualTo(TransferStatus.PENDING);
         assertThat(result.transfer().getIdempotencyKey()).isEqualTo(key);
+        // Origem debitada; destino NÃO é creditado nesta etapa.
         assertThat(origem.getBalance()).usingComparator(BigDecimal::compareTo)
                 .isEqualTo(new BigDecimal("700.00"));
-        assertThat(destino.getBalance()).usingComparator(BigDecimal::compareTo)
-                .isEqualTo(new BigDecimal("300.00"));
         verify(transferRepository).save(any(Transfer.class));
+        verify(eventPublisher).publishEvent(any(TransferRequested.class));
     }
 }

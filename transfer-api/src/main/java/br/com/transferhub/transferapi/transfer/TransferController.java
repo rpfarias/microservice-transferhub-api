@@ -58,7 +58,9 @@ public class TransferController {
                 .buildAndExpand(result.transfer().getId())
                 .toUri();
 
-        return ResponseEntity.created(location).body(body);
+        // 202 Accepted: a transferência foi ACEITA (origem debitada, PENDING), não
+        // concluída. O cliente consulta o status depois via GET. É liquidação real.
+        return ResponseEntity.accepted().location(location).body(body);
     }
 
     @GetMapping("/{id}")
