@@ -12,6 +12,9 @@ import lombok.AccessLevel;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 
+import br.com.transferhub.transferapi.common.exception.InsufficientBalanceException;
+import br.com.transferhub.transferapi.common.exception.InvalidAmountException;
+
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
 import java.util.UUID;
@@ -61,6 +64,35 @@ public class Account {
     void onCreate() {
         if (this.createdAt == null) {
             this.createdAt = OffsetDateTime.now();
+        }
+    }
+
+    // ---- Comportamento de domínio (invariantes vivem aqui, não no service) ----
+
+    /**
+     * Debita o valor do saldo. Recusa valor não-positivo e saldo insuficiente,
+     * garantindo que a conta nunca fique negativa.
+     */
+    public void debit(BigDecimal amount) {
+        requirePositive(amount);
+        // compareTo (nunca equals): equals do BigDecimal considera a escala,
+        // então new BigDecimal("100.00").equals("100.0") é FALSE. compareTo compara o valor.
+        if (this.balance.compareTo(amount) < 0) {
+            throw new InsufficientBalanceException(this.id, this.balance, amount);
+        }
+        this.balance = this.balance.subtract(amount);
+    }
+
+    /** Credita o valor no saldo. */
+    public void credit(BigDecimal amount) {
+        requirePositive(amount);
+        this.balance = this.balance.add(amount);
+    }
+
+    private static void requirePositive(BigDecimal amount) {
+        // signum() > 0 <=> valor estritamente positivo; cobre null, zero e negativos.
+        if (amount == null || amount.signum() <= 0) {
+            throw new InvalidAmountException(amount);
         }
     }
 }
