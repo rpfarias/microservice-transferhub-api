@@ -22,3 +22,7 @@ Thumbs.db
 # Env / secrets locais (nunca commitar credenciais reais)
 .env
 .env.local
+
+# Ferramentas / docs internos (fora do repo público)
+.claude/
+SPEC.md
