@@ -25,8 +25,8 @@ import static org.mockito.Mockito.when;
 
 /**
  * Teste UNITÁRIO do service com Mockito: os repositórios são mocks, então não
- * há banco envolvido. Testamos apenas a orquestração (validações, ordem das
- * chamadas, o que NÃO deve ser salvo em caso de erro).
+ * há banco. Testamos a orquestração — incluindo a idempotência e o que NÃO deve
+ * ser salvo em caso de erro.
  */
 @ExtendWith(MockitoExtension.class)
 class TransferServiceTest {
@@ -40,6 +40,7 @@ class TransferServiceTest {
     @InjectMocks
     TransferService service;
 
+    private final String key = "idem-key-1";
     private final UUID sourceId = UUID.randomUUID();
     private final UUID targetId = UUID.randomUUID();
 
@@ -53,10 +54,27 @@ class TransferServiceTest {
     }
 
     @Test
-    @DisplayName("mesma conta de origem e destino é rejeitada antes de tocar o repositório")
+    @DisplayName("chave de idempotência já existente devolve a anterior sem criar nova")
+    void chaveExistente_devolveExistenteSemCriar() {
+        Transfer existente = new Transfer(sourceId, targetId, new BigDecimal("10.00"), key);
+        when(transferRepository.findByIdempotencyKey(key)).thenReturn(Optional.of(existente));
+
+        TransferResult result = service.transfer(key, sourceId, targetId, new BigDecimal("10.00"));
+
+        assertThat(result.created()).isFalse();
+        assertThat(result.transfer()).isSameAs(existente);
+        // Nem toca nas contas, nem salva de novo.
+        verify(accountRepository, never()).findById(any());
+        verify(transferRepository, never()).save(any());
+    }
+
+    @Test
+    @DisplayName("mesma conta de origem e destino é rejeitada")
     void mesmaConta_rejeitada() {
+        when(transferRepository.findByIdempotencyKey(key)).thenReturn(Optional.empty());
+
         assertThatExceptionOfType(SameAccountException.class)
-                .isThrownBy(() -> service.transfer(sourceId, sourceId, new BigDecimal("10.00")));
+                .isThrownBy(() -> service.transfer(key, sourceId, sourceId, new BigDecimal("10.00")));
 
         verify(transferRepository, never()).save(any());
     }
@@ -64,10 +82,11 @@ class TransferServiceTest {
     @Test
     @DisplayName("conta de origem inexistente lança e não persiste nada")
     void origemInexistente_lanca() {
+        when(transferRepository.findByIdempotencyKey(key)).thenReturn(Optional.empty());
         when(accountRepository.findById(sourceId)).thenReturn(Optional.empty());
 
         assertThatExceptionOfType(AccountNotFoundException.class)
-                .isThrownBy(() -> service.transfer(sourceId, targetId, new BigDecimal("10.00")));
+                .isThrownBy(() -> service.transfer(key, sourceId, targetId, new BigDecimal("10.00")));
 
         verify(transferRepository, never()).save(any());
     }
@@ -75,11 +94,12 @@ class TransferServiceTest {
     @Test
     @DisplayName("conta de destino inexistente lança e não persiste nada")
     void destinoInexistente_lanca() {
+        when(transferRepository.findByIdempotencyKey(key)).thenReturn(Optional.empty());
         when(accountRepository.findById(sourceId)).thenReturn(Optional.of(contaCom("100.00")));
         when(accountRepository.findById(targetId)).thenReturn(Optional.empty());
 
         assertThatExceptionOfType(AccountNotFoundException.class)
-                .isThrownBy(() -> service.transfer(sourceId, targetId, new BigDecimal("10.00")));
+                .isThrownBy(() -> service.transfer(key, sourceId, targetId, new BigDecimal("10.00")));
 
         verify(transferRepository, never()).save(any());
     }
@@ -87,28 +107,31 @@ class TransferServiceTest {
     @Test
     @DisplayName("saldo insuficiente aborta e não persiste a transferência")
     void saldoInsuficiente_naoPersiste() {
+        when(transferRepository.findByIdempotencyKey(key)).thenReturn(Optional.empty());
         when(accountRepository.findById(sourceId)).thenReturn(Optional.of(contaCom("50.00")));
         when(accountRepository.findById(targetId)).thenReturn(Optional.of(contaCom("0.00")));
 
         assertThatExceptionOfType(InsufficientBalanceException.class)
-                .isThrownBy(() -> service.transfer(sourceId, targetId, new BigDecimal("500.00")));
+                .isThrownBy(() -> service.transfer(key, sourceId, targetId, new BigDecimal("500.00")));
 
         verify(transferRepository, never()).save(any());
     }
 
     @Test
-    @DisplayName("transferência válida debita, credita e salva como COMPLETED")
-    void transferenciaValida_salvaCompleted() {
+    @DisplayName("transferência válida cria, debita, credita e marca COMPLETED")
+    void transferenciaValida_criaCompleted() {
         Account origem = contaCom("1000.00");
         Account destino = contaCom("0.00");
+        when(transferRepository.findByIdempotencyKey(key)).thenReturn(Optional.empty());
         when(accountRepository.findById(sourceId)).thenReturn(Optional.of(origem));
         when(accountRepository.findById(targetId)).thenReturn(Optional.of(destino));
-        // devolve a própria Transfer que o service mandar salvar
         when(transferRepository.save(any(Transfer.class))).thenAnswer(inv -> inv.getArgument(0));
 
-        Transfer resultado = service.transfer(sourceId, targetId, new BigDecimal("300.00"));
+        TransferResult result = service.transfer(key, sourceId, targetId, new BigDecimal("300.00"));
 
-        assertThat(resultado.getStatus()).isEqualTo(TransferStatus.COMPLETED);
+        assertThat(result.created()).isTrue();
+        assertThat(result.transfer().getStatus()).isEqualTo(TransferStatus.COMPLETED);
+        assertThat(result.transfer().getIdempotencyKey()).isEqualTo(key);
         assertThat(origem.getBalance()).usingComparator(BigDecimal::compareTo)
                 .isEqualTo(new BigDecimal("700.00"));
         assertThat(destino.getBalance()).usingComparator(BigDecimal::compareTo)

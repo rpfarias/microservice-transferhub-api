@@ -1,9 +1,11 @@
 package br.com.transferhub.transferapi.common.exception;
 
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.MissingRequestHeaderException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
@@ -51,6 +53,25 @@ public class GlobalExceptionHandler {
     })
     ProblemDetail handleBusinessRule(RuntimeException ex) {
         return ProblemDetail.forStatusAndDetail(HttpStatus.UNPROCESSABLE_ENTITY, ex.getMessage());
+    }
+
+    // 400 Bad Request: header obrigatório ausente (ex.: Idempotency-Key).
+    @ExceptionHandler(MissingRequestHeaderException.class)
+    ProblemDetail handleMissingHeader(MissingRequestHeaderException ex) {
+        return ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST,
+                "Header obrigatório ausente: " + ex.getHeaderName());
+    }
+
+    /*
+     * 409 Conflict: violação de restrição do banco (ex.: UNIQUE da idempotency_key).
+     * Rede de segurança para a corrida em que duas requisições com a mesma chave
+     * passam pela checagem inicial e tentam inserir ao mesmo tempo — o UNIQUE garante
+     * que só uma vinga; a outra cai aqui em vez de duplicar a transferência.
+     */
+    @ExceptionHandler(DataIntegrityViolationException.class)
+    ProblemDetail handleDataIntegrity(DataIntegrityViolationException ex) {
+        return ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT,
+                "Conflito de integridade (possível chave de idempotência concorrente). Tente novamente.");
     }
 
     // 400 Bad Request: falha de validação de formato (Bean Validation nos DTOs).
