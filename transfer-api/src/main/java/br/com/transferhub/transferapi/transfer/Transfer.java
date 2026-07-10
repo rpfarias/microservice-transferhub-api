@@ -43,6 +43,14 @@ public class Transfer {
     @Column(nullable = false, precision = 19, scale = 4)
     private BigDecimal amount;
 
+    /**
+     * Chave de idempotência fornecida pelo cliente (header Idempotency-Key).
+     * UNIQUE no banco: é a garantia FÍSICA de que a mesma chave nunca gera duas
+     * transferências, mesmo sob concorrência.
+     */
+    @Column(name = "idempotency_key", nullable = false, unique = true, length = 64)
+    private String idempotencyKey;
+
     @Enumerated(EnumType.STRING) // grava o NOME ("COMPLETED"), não o ordinal (0,1,2).
     @Column(nullable = false, length = 20)
     private TransferStatus status;
@@ -56,10 +64,11 @@ public class Transfer {
     @Column(name = "updated_at", nullable = false)
     private OffsetDateTime updatedAt;
 
-    public Transfer(UUID sourceAccountId, UUID targetAccountId, BigDecimal amount) {
+    public Transfer(UUID sourceAccountId, UUID targetAccountId, BigDecimal amount, String idempotencyKey) {
         this.sourceAccountId = sourceAccountId;
         this.targetAccountId = targetAccountId;
         this.amount = amount;
+        this.idempotencyKey = idempotencyKey;
         this.status = TransferStatus.PENDING; // nasce PENDING; a transição é explícita
     }
 

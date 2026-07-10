@@ -9,6 +9,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.util.Optional;
 import java.util.UUID;
 
 @Service
@@ -23,12 +24,19 @@ public class TransferService {
     }
 
     /**
-     * Transferência SÍNCRONA: débito, crédito e registro numa ÚNICA transação.
-     * Ou tudo acontece, ou nada — é impossível debitar a origem sem creditar o destino.
+     * Transferência SÍNCRONA e IDEMPOTENTE: débito, crédito e registro numa ÚNICA
+     * transação. Ou tudo acontece, ou nada.
      * (Na Etapa 5 isso quebra: o crédito sai daqui e vira evento assíncrono.)
      */
     @Transactional
-    public Transfer transfer(UUID sourceId, UUID targetId, BigDecimal amount) {
+    public TransferResult transfer(String idempotencyKey, UUID sourceId, UUID targetId, BigDecimal amount) {
+        // IDEMPOTÊNCIA (primeira coisa): se a chave já foi processada, devolve o
+        // resultado anterior SEM refazer nada. É o que torna o retry do cliente seguro.
+        Optional<Transfer> existing = transferRepository.findByIdempotencyKey(idempotencyKey);
+        if (existing.isPresent()) {
+            return new TransferResult(existing.get(), false);
+        }
+
         if (sourceId.equals(targetId)) {
             throw new SameAccountException();
         }
@@ -49,9 +57,9 @@ public class TransferService {
         // no commit — com a cláusula de @Version (optimistic lock). Se outra
         // transação concorrente tiver alterado a mesma conta, o commit falha com
         // OptimisticLockException e nada é persistido.
-        Transfer transfer = new Transfer(sourceId, targetId, amount);
+        Transfer transfer = new Transfer(sourceId, targetId, amount, idempotencyKey);
         transfer.complete(); // síncrono: já nasce e conclui na mesma transação
-        return transferRepository.save(transfer);
+        return new TransferResult(transferRepository.save(transfer), true);
     }
 
     @Transactional(readOnly = true)
