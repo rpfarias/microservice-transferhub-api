@@ -81,4 +81,47 @@ public class TransferService {
         return transferRepository.findById(id)
                 .orElseThrow(() -> new TransferNotFoundException(id));
     }
+
+    /**
+     * Consome TransferSettled: credita o destino e conclui a transferência.
+     *
+     * IDEMPOTENTE: se status != PENDING, a mensagem é duplicata (at-least-once)
+     * — ignora sem creditar de novo. O status é máquina de estados de mão única:
+     * PENDING -> COMPLETED | FAILED, nunca volta.
+     */
+    @Transactional
+    public void settle(UUID transferId) {
+        Transfer transfer = transferRepository.findById(transferId)
+                .orElseThrow(() -> new TransferNotFoundException(transferId));
+        if (transfer.getStatus() != TransferStatus.PENDING) {
+            return;
+        }
+
+        Account target = accountRepository.findById(transfer.getTargetAccountId())
+                .orElseThrow(() -> new AccountNotFoundException(transfer.getTargetAccountId()));
+        target.credit(transfer.getAmount());
+        transfer.complete();
+    }
+
+    /**
+     * Consome TransferFailed: TRANSAÇÃO COMPENSATÓRIA. O débito da origem já
+     * commitou lá atrás (Etapa 5) e não pode ser "desfeito" — não existe
+     * transação distribuída aqui. Compensamos com a operação inversa: creditar
+     * de volta a origem (estorno). É o mecanismo básico de uma Saga coreografada.
+     *
+     * IDEMPOTENTE pelo mesmo critério: status != PENDING -> ignora.
+     */
+    @Transactional
+    public void fail(UUID transferId, String reason) {
+        Transfer transfer = transferRepository.findById(transferId)
+                .orElseThrow(() -> new TransferNotFoundException(transferId));
+        if (transfer.getStatus() != TransferStatus.PENDING) {
+            return;
+        }
+
+        Account source = accountRepository.findById(transfer.getSourceAccountId())
+                .orElseThrow(() -> new AccountNotFoundException(transfer.getSourceAccountId()));
+        source.credit(transfer.getAmount()); // estorno do débito original
+        transfer.fail(reason);
+    }
 }

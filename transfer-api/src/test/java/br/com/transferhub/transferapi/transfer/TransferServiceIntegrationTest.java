@@ -7,6 +7,9 @@ import br.com.transferhub.transferapi.common.exception.InsufficientBalanceExcept
 import br.com.transferhub.transferapi.common.exception.SameAccountException;
 import br.com.transferhub.transferapi.messaging.RabbitConfig;
 import br.com.transferhub.transferapi.messaging.TransferRequested;
+import br.com.transferhub.transferapi.messaging.TransferFailed;
+import br.com.transferhub.transferapi.messaging.TransferSettled;
+import org.awaitility.Awaitility;
 import org.junit.jupiter.api.Test;
 import org.springframework.amqp.core.Binding;
 import org.springframework.amqp.core.BindingBuilder;
@@ -20,6 +23,9 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
 
 import java.math.BigDecimal;
+import java.time.Duration;
+import java.time.OffsetDateTime;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
@@ -139,6 +145,57 @@ class TransferServiceIntegrationTest {
         assertThatExceptionOfType(SameAccountException.class)
                 .isThrownBy(() -> transferService.transfer(
                         "key-mesma", account.getId(), account.getId(), new BigDecimal("10.00")));
+    }
+
+    // ---------- Etapa 7: ciclo completo via broker (listeners reais) ----------
+
+    @Test
+    void transferSettledConsumido_creditaDestinoECompleta() {
+        Account source = newAccount("10101010101", "1000.00");
+        Account target = newAccount("20202020202", "0.00");
+        TransferResult result = transferService.transfer(
+                "key-e2e-settled", source.getId(), target.getId(), new BigDecimal("400.00"));
+        UUID transferId = result.transfer().getId();
+
+        // Simula o settlement-worker aprovando: publica TransferSettled no broker.
+        rabbitTemplate.convertAndSend(RabbitConfig.EXCHANGE, RabbitConfig.RK_TRANSFER_SETTLED,
+                new TransferSettled(transferId, UUID.randomUUID(), OffsetDateTime.now()));
+
+        // O @RabbitListener processa assíncrono; Awaitility espera a condição.
+        Awaitility.await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
+            Transfer t = transferRepository.findById(transferId).orElseThrow();
+            assertThat(t.getStatus()).isEqualTo(TransferStatus.COMPLETED);
+        });
+        assertThat(accountRepository.findById(target.getId()).orElseThrow().getBalance())
+                .usingComparator(BigDecimal::compareTo).isEqualTo(new BigDecimal("400.00"));
+    }
+
+    @Test
+    void transferFailedConsumido_estornaOrigemEMarcaFailed() {
+        Account source = newAccount("30303030303", "1000.00");
+        Account target = newAccount("40404040404", "0.00");
+        TransferResult result = transferService.transfer(
+                "key-e2e-failed", source.getId(), target.getId(), new BigDecimal("400.00"));
+        UUID transferId = result.transfer().getId();
+
+        // Origem foi debitada (600.00) na aceitação.
+        assertThat(accountRepository.findById(source.getId()).orElseThrow().getBalance())
+                .usingComparator(BigDecimal::compareTo).isEqualTo(new BigDecimal("600.00"));
+
+        // Simula o worker rejeitando: publica TransferFailed.
+        rabbitTemplate.convertAndSend(RabbitConfig.EXCHANGE, RabbitConfig.RK_TRANSFER_FAILED,
+                new TransferFailed(transferId, "limite diario excedido", OffsetDateTime.now()));
+
+        Awaitility.await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
+            Transfer t = transferRepository.findById(transferId).orElseThrow();
+            assertThat(t.getStatus()).isEqualTo(TransferStatus.FAILED);
+            assertThat(t.getFailureReason()).isEqualTo("limite diario excedido");
+        });
+        // TRANSAÇÃO COMPENSATÓRIA: estorno devolveu o débito; destino intacto.
+        assertThat(accountRepository.findById(source.getId()).orElseThrow().getBalance())
+                .usingComparator(BigDecimal::compareTo).isEqualTo(new BigDecimal("1000.00"));
+        assertThat(accountRepository.findById(target.getId()).orElseThrow().getBalance())
+                .usingComparator(BigDecimal::compareTo).isEqualTo(new BigDecimal("0.00"));
     }
 
     @Test

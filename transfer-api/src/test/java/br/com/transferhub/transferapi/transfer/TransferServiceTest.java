@@ -147,4 +147,68 @@ class TransferServiceTest {
         verify(transferRepository).save(any(Transfer.class));
         verify(eventPublisher).publishEvent(any(TransferRequested.class));
     }
+
+    // ---------- Etapa 7: consumers (settle / fail) ----------
+
+    @Test
+    @DisplayName("settle credita o destino e marca COMPLETED")
+    void settle_creditaDestinoECompleta() {
+        Transfer pending = new Transfer(sourceId, targetId, new BigDecimal("300.00"), key);
+        Account destino = contaCom("0.00");
+        UUID transferId = UUID.randomUUID();
+        when(transferRepository.findById(transferId)).thenReturn(Optional.of(pending));
+        when(accountRepository.findById(targetId)).thenReturn(Optional.of(destino));
+
+        service.settle(transferId);
+
+        assertThat(pending.getStatus()).isEqualTo(TransferStatus.COMPLETED);
+        assertThat(destino.getBalance()).usingComparator(BigDecimal::compareTo)
+                .isEqualTo(new BigDecimal("300.00"));
+    }
+
+    @Test
+    @DisplayName("settle duplicado (status != PENDING) ignora — não credita duas vezes")
+    void settle_duplicado_ignora() {
+        Transfer jaConcluida = new Transfer(sourceId, targetId, new BigDecimal("300.00"), key);
+        jaConcluida.complete(); // primeira entrega já processou
+        UUID transferId = UUID.randomUUID();
+        when(transferRepository.findById(transferId)).thenReturn(Optional.of(jaConcluida));
+
+        service.settle(transferId);
+
+        // Nem toca na conta destino: crédito duplo evitado.
+        verify(accountRepository, never()).findById(any());
+    }
+
+    @Test
+    @DisplayName("fail estorna a origem (transação compensatória) e marca FAILED com motivo")
+    void fail_estornaOrigem() {
+        Transfer pending = new Transfer(sourceId, targetId, new BigDecimal("300.00"), key);
+        Account origem = contaCom("700.00"); // origem após o débito original de 300
+        UUID transferId = UUID.randomUUID();
+        when(transferRepository.findById(transferId)).thenReturn(Optional.of(pending));
+        when(accountRepository.findById(sourceId)).thenReturn(Optional.of(origem));
+
+        service.fail(transferId, "limite diario excedido");
+
+        assertThat(pending.getStatus()).isEqualTo(TransferStatus.FAILED);
+        assertThat(pending.getFailureReason()).isEqualTo("limite diario excedido");
+        // Estorno: origem volta ao saldo pré-débito.
+        assertThat(origem.getBalance()).usingComparator(BigDecimal::compareTo)
+                .isEqualTo(new BigDecimal("1000.00"));
+    }
+
+    @Test
+    @DisplayName("fail duplicado (status != PENDING) ignora — não estorna duas vezes")
+    void fail_duplicado_ignora() {
+        Transfer jaFalhada = new Transfer(sourceId, targetId, new BigDecimal("300.00"), key);
+        jaFalhada.fail("motivo original");
+        UUID transferId = UUID.randomUUID();
+        when(transferRepository.findById(transferId)).thenReturn(Optional.of(jaFalhada));
+
+        service.fail(transferId, "segunda entrega");
+
+        verify(accountRepository, never()).findById(any());
+        assertThat(jaFalhada.getFailureReason()).isEqualTo("motivo original");
+    }
 }
