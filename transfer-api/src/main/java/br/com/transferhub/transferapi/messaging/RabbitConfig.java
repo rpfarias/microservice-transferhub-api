@@ -24,11 +24,14 @@ import tools.jackson.databind.json.JsonMapper;
 public class RabbitConfig {
 
     public static final String EXCHANGE = "transfers.exchange";
+    public static final String DLX = "transfers.dlx";
     public static final String RK_TRANSFER_REQUESTED = "transfer.requested";
     public static final String RK_TRANSFER_SETTLED = "transfer.settled";
     public static final String RK_TRANSFER_FAILED = "transfer.failed";
     public static final String Q_TRANSFER_SETTLED = "q.transfer.settled";
     public static final String Q_TRANSFER_FAILED = "q.transfer.failed";
+    public static final String Q_TRANSFER_SETTLED_DLQ = "q.transfer.settled.dlq";
+    public static final String Q_TRANSFER_FAILED_DLQ = "q.transfer.failed.dlq";
 
     @Bean
     TopicExchange transfersExchange() {
@@ -37,13 +40,29 @@ public class RabbitConfig {
     }
 
     @Bean
+    TopicExchange transfersDlx() {
+        return ExchangeBuilder.topicExchange(DLX).durable(true).build();
+    }
+
+    @Bean
     Queue transferSettledQueue() {
-        return QueueBuilder.durable(Q_TRANSFER_SETTLED).build();
+        // Retry esgotado / erro fatal -> DLX -> DLQ (routing key original preservada).
+        return QueueBuilder.durable(Q_TRANSFER_SETTLED).deadLetterExchange(DLX).build();
     }
 
     @Bean
     Queue transferFailedQueue() {
-        return QueueBuilder.durable(Q_TRANSFER_FAILED).build();
+        return QueueBuilder.durable(Q_TRANSFER_FAILED).deadLetterExchange(DLX).build();
+    }
+
+    @Bean
+    Queue transferSettledDlq() {
+        return QueueBuilder.durable(Q_TRANSFER_SETTLED_DLQ).build();
+    }
+
+    @Bean
+    Queue transferFailedDlq() {
+        return QueueBuilder.durable(Q_TRANSFER_FAILED_DLQ).build();
     }
 
     @Bean
@@ -54,6 +73,16 @@ public class RabbitConfig {
     @Bean
     Binding transferFailedBinding(Queue transferFailedQueue, TopicExchange transfersExchange) {
         return BindingBuilder.bind(transferFailedQueue).to(transfersExchange).with(RK_TRANSFER_FAILED);
+    }
+
+    @Bean
+    Binding transferSettledDlqBinding(Queue transferSettledDlq, TopicExchange transfersDlx) {
+        return BindingBuilder.bind(transferSettledDlq).to(transfersDlx).with(RK_TRANSFER_SETTLED);
+    }
+
+    @Bean
+    Binding transferFailedDlqBinding(Queue transferFailedDlq, TopicExchange transfersDlx) {
+        return BindingBuilder.bind(transferFailedDlq).to(transfersDlx).with(RK_TRANSFER_FAILED);
     }
 
     @Bean

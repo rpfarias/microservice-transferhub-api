@@ -5,12 +5,16 @@ import br.com.transferhub.settlementworker.messaging.RabbitConfig;
 import br.com.transferhub.settlementworker.messaging.TransferFailed;
 import br.com.transferhub.settlementworker.messaging.TransferRequested;
 import br.com.transferhub.settlementworker.messaging.TransferSettled;
+import org.awaitility.Awaitility;
 import org.junit.jupiter.api.Test;
 import org.springframework.amqp.core.Binding;
 import org.springframework.amqp.core.BindingBuilder;
+import org.springframework.amqp.core.Message;
+import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.core.Queue;
 import org.springframework.amqp.core.TopicExchange;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -19,10 +23,16 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
 
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doCallRealMethod;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 
 /**
  * Integração real: publica TransferRequested na exchange, o @RabbitListener do
@@ -62,6 +72,11 @@ class SettlementIntegrationTest {
     @Autowired
     SettlementRecordRepository repository;
 
+    /** Spy no service real: os demais testes usam o comportamento real; o teste de
+     *  retry o instrui a falhar 2x (falha técnica simulada) e funcionar na 3ª. */
+    @MockitoSpyBean
+    SettlementService settlementService;
+
     @Autowired
     @Qualifier("testSettledQueue")
     Queue testSettledQueue;
@@ -88,6 +103,45 @@ class SettlementIntegrationTest {
         assertThat(((TransferSettled) out).transferId()).isEqualTo(transferId);
 
         assertThat(repository.existsByTransferId(transferId)).isTrue();
+    }
+
+    // ---------- Etapa 8: retry (falha técnica) e DLQ (mensagem venenosa) ----------
+
+    @Test
+    void falhaTecnicaTransiente_retryRecupera() {
+        UUID transferId = UUID.randomUUID();
+        UUID targetId = UUID.randomUUID();
+
+        // Simula falha TÉCNICA transiente (ex.: banco fora) nas 2 primeiras tentativas.
+        doThrow(new RuntimeException("banco fora (simulado)"))
+                .doThrow(new RuntimeException("banco fora (simulado)"))
+                .doCallRealMethod()
+                .when(settlementService).process(any());
+
+        publish(transferId, targetId, "10000.00");
+
+        // O retry (max-attempts=3, backoff 1s/2s) recupera na 3ª tentativa.
+        Awaitility.await().atMost(Duration.ofSeconds(20)).untilAsserted(() ->
+                assertThat(repository.existsByTransferId(transferId)).isTrue());
+        verify(settlementService, times(3)).process(any());
+
+        // E a mensagem NÃO foi para a DLQ (foi processada com sucesso).
+        assertThat(rabbitTemplate.receive(RabbitConfig.Q_TRANSFER_REQUESTED_DLQ, 500)).isNull();
+    }
+
+    @Test
+    void mensagemVenenosa_caiNaDlq() {
+        // Corpo que NÃO desserializa como TransferRequested: falha em toda tentativa
+        // e, esgotado o retry, é rejeitada sem requeue -> DLX -> DLQ.
+        MessageProperties props = new MessageProperties();
+        props.setContentType(MessageProperties.CONTENT_TYPE_JSON);
+        rabbitTemplate.send(RabbitConfig.EXCHANGE, RabbitConfig.RK_TRANSFER_REQUESTED,
+                new Message("isto-nao-e-json-valido".getBytes(), props));
+
+        // Recebe CRU da DLQ (converter de novo lançaria a mesma exceção).
+        Message dead = rabbitTemplate.receive(RabbitConfig.Q_TRANSFER_REQUESTED_DLQ, 15_000);
+        assertThat(dead).isNotNull();
+        assertThat(new String(dead.getBody())).isEqualTo("isto-nao-e-json-valido");
     }
 
     @Test
