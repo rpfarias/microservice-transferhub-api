@@ -1,12 +1,20 @@
 package br.com.transferhub.settlementworker.messaging;
 
+import br.com.transferhub.settlementworker.settlement.BusinessRuleException;
 import br.com.transferhub.settlementworker.settlement.SettlementService;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.stereotype.Component;
 
 /**
- * Consome TransferRequested da fila e delega a decisão de liquidação ao service.
- * Fino de propósito: a lógica vive no domínio/service, não no adaptador de mensageria.
+ * Consome TransferRequested. AQUI mora a separação exceção de negócio vs. técnica:
+ *
+ * - BusinessRuleException (determinística): capturada e convertida em rejeição
+ *   imediata (REJECTED + TransferFailed). Retentar não mudaria o resultado —
+ *   retry seria desperdício e atrasaria a resposta ao usuário.
+ *
+ * - Qualquer outra exceção (técnica/transiente: banco fora, timeout): PROPAGA.
+ *   O container faz retry (3x, backoff exponencial) e, esgotado, envia a
+ *   mensagem para a DLQ (q.transfer.requested.dlq) para investigação humana.
  */
 @Component
 public class SettlementListener {
@@ -19,6 +27,10 @@ public class SettlementListener {
 
     @RabbitListener(queues = RabbitConfig.Q_TRANSFER_REQUESTED)
     public void onTransferRequested(TransferRequested event) {
-        settlementService.process(event);
+        try {
+            settlementService.process(event);
+        } catch (BusinessRuleException e) {
+            settlementService.reject(event, e.getMessage());
+        }
     }
 }

@@ -27,6 +27,12 @@ public class SettlementService {
         this.eventPublisher = eventPublisher;
     }
 
+    /**
+     * Tenta liquidar. Aprovado: grava SETTLED e publica TransferSettled (após commit).
+     * Regra violada: lança BusinessRuleException — NADA é persistido aqui; o
+     * listener converte a exceção no caminho reject() (rejeição imediata, sem retry).
+     * Exceções técnicas (banco fora etc.) propagam e caem no retry -> DLQ.
+     */
     @Transactional
     public void process(TransferRequested event) {
         // IDEMPOTÊNCIA DO CONSUMER: entrega é "pelo menos uma vez". Se já processamos
@@ -35,37 +41,44 @@ public class SettlementService {
             return;
         }
 
-        String rejectionReason = evaluate(event.targetAccountId(), event.amount());
+        evaluate(event.targetAccountId(), event.amount()); // lança se violar regra
 
-        if (rejectionReason == null) {
-            SettlementRecord record = repository.save(
-                    SettlementRecord.settled(event.transferId(), event.targetAccountId(), event.amount()));
-            eventPublisher.publishEvent(
-                    new TransferSettled(event.transferId(), record.getId(), OffsetDateTime.now()));
-        } else {
-            repository.save(
-                    SettlementRecord.rejected(event.transferId(), event.targetAccountId(), event.amount(), rejectionReason));
-            eventPublisher.publishEvent(
-                    new TransferFailed(event.transferId(), rejectionReason, OffsetDateTime.now()));
-        }
+        SettlementRecord record = repository.save(
+                SettlementRecord.settled(event.transferId(), event.targetAccountId(), event.amount()));
+        eventPublisher.publishEvent(
+                new TransferSettled(event.transferId(), record.getId(), OffsetDateTime.now()));
     }
 
     /**
-     * Aplica as regras de limite. Retorna null se aprovado, ou a razão da rejeição.
-     * Rejeição é resultado de NEGÓCIO — não é exceção.
+     * Rejeição de NEGÓCIO: resultado normal do fluxo, não erro do sistema.
+     * Grava REJECTED e publica TransferFailed (após commit). Idempotente pelo
+     * mesmo critério do process().
      */
-    private String evaluate(UUID targetAccountId, BigDecimal amount) {
+    @Transactional
+    public void reject(TransferRequested event, String reason) {
+        if (repository.existsByTransferId(event.transferId())) {
+            return;
+        }
+        repository.save(SettlementRecord.rejected(
+                event.transferId(), event.targetAccountId(), event.amount(), reason));
+        eventPublisher.publishEvent(
+                new TransferFailed(event.transferId(), reason, OffsetDateTime.now()));
+    }
+
+    /** Aplica as regras de limite; lança BusinessRuleException na violação. */
+    private void evaluate(UUID targetAccountId, BigDecimal amount) {
         if (amount.compareTo(PER_TRANSACTION_LIMIT) > 0) {
-            return "Valor " + amount + " excede o limite por transacao de " + PER_TRANSACTION_LIMIT;
+            throw new BusinessRuleException(
+                    "Valor " + amount + " excede o limite por transacao de " + PER_TRANSACTION_LIMIT);
         }
 
         OffsetDateTime since = OffsetDateTime.now().minusHours(24);
         BigDecimal settledLast24h = repository.sumSettledToTargetSince(targetAccountId, since);
 
         if (settledLast24h.add(amount).compareTo(DAILY_TARGET_LIMIT) > 0) {
-            return "Limite diario de " + DAILY_TARGET_LIMIT + " para a conta destino excedido"
-                    + " (ja liquidado em 24h: " + settledLast24h + ")";
+            throw new BusinessRuleException(
+                    "Limite diario de " + DAILY_TARGET_LIMIT + " para a conta destino excedido"
+                            + " (ja liquidado em 24h: " + settledLast24h + ")");
         }
-        return null;
     }
 }

@@ -17,6 +17,7 @@ import java.time.OffsetDateTime;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
@@ -49,6 +50,8 @@ class SettlementServiceTest {
         return captor.getValue();
     }
 
+    // ---------- process(): aprova ou LANÇA BusinessRuleException ----------
+
     @Test
     @DisplayName("dentro dos limites: grava SETTLED e publica TransferSettled")
     void aprovado_settled() {
@@ -63,30 +66,27 @@ class SettlementServiceTest {
     }
 
     @Test
-    @DisplayName("acima de 50.000 por transação: REJECTED e TransferFailed (nem consulta o histórico)")
-    void rejeitado_porLimitePorTransacao() {
+    @DisplayName("acima de 50.000/transação: lança BusinessRuleException, nada persistido")
+    void limitePorTransacao_lanca() {
         when(repository.existsByTransferId(transferId)).thenReturn(false);
-        when(repository.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
-        service.process(req("60000.00"));
+        assertThatExceptionOfType(BusinessRuleException.class)
+                .isThrownBy(() -> service.process(req("60000.00")));
 
-        SettlementRecord record = savedRecord();
-        assertThat(record.getOutcome()).isEqualTo(SettlementOutcome.REJECTED);
-        assertThat(record.getRejectionReason()).isNotBlank();
-        verify(eventPublisher).publishEvent(any(TransferFailed.class));
+        verify(repository, never()).save(any());
+        verify(eventPublisher, never()).publishEvent(any());
     }
 
     @Test
-    @DisplayName("soma 24h + valor acima de 100.000: REJECTED e TransferFailed")
-    void rejeitado_porLimiteDiario() {
+    @DisplayName("soma 24h + valor acima de 100.000: lança BusinessRuleException")
+    void limiteDiario_lanca() {
         when(repository.existsByTransferId(transferId)).thenReturn(false);
         when(repository.sumSettledToTargetSince(eq(targetId), any())).thenReturn(new BigDecimal("80000.00"));
-        when(repository.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
-        service.process(req("30000.00")); // 80.000 + 30.000 = 110.000 > 100.000
+        assertThatExceptionOfType(BusinessRuleException.class)
+                .isThrownBy(() -> service.process(req("30000.00"))); // 110.000 > 100.000
 
-        assertThat(savedRecord().getOutcome()).isEqualTo(SettlementOutcome.REJECTED);
-        verify(eventPublisher).publishEvent(any(TransferFailed.class));
+        verify(repository, never()).save(any());
     }
 
     @Test
@@ -96,18 +96,45 @@ class SettlementServiceTest {
         when(repository.sumSettledToTargetSince(eq(targetId), any())).thenReturn(new BigDecimal("70000.00"));
         when(repository.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
-        service.process(req("30000.00")); // 70.000 + 30.000 = 100.000 (não excede)
+        service.process(req("30000.00")); // 100.000 exato: não excede
 
         assertThat(savedRecord().getOutcome()).isEqualTo(SettlementOutcome.SETTLED);
         verify(eventPublisher).publishEvent(any(TransferSettled.class));
     }
 
     @Test
-    @DisplayName("transfer_id já processado: ignora (idempotência do consumer)")
-    void jaProcessado_ignora() {
+    @DisplayName("transfer_id já processado: process ignora (idempotência)")
+    void processJaProcessado_ignora() {
         when(repository.existsByTransferId(transferId)).thenReturn(true);
 
         service.process(req("10000.00"));
+
+        verify(repository, never()).save(any());
+        verify(eventPublisher, never()).publishEvent(any());
+    }
+
+    // ---------- reject(): rejeição de negócio imediata ----------
+
+    @Test
+    @DisplayName("reject grava REJECTED com motivo e publica TransferFailed")
+    void reject_gravaEPublica() {
+        when(repository.existsByTransferId(transferId)).thenReturn(false);
+        when(repository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        service.reject(req("60000.00"), "limite excedido");
+
+        SettlementRecord record = savedRecord();
+        assertThat(record.getOutcome()).isEqualTo(SettlementOutcome.REJECTED);
+        assertThat(record.getRejectionReason()).isEqualTo("limite excedido");
+        verify(eventPublisher).publishEvent(any(TransferFailed.class));
+    }
+
+    @Test
+    @DisplayName("reject com transfer_id já processado: ignora (idempotência)")
+    void rejectJaProcessado_ignora() {
+        when(repository.existsByTransferId(transferId)).thenReturn(true);
+
+        service.reject(req("60000.00"), "qualquer");
 
         verify(repository, never()).save(any());
         verify(eventPublisher, never()).publishEvent(any());

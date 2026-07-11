@@ -19,7 +19,9 @@ import tools.jackson.databind.json.JsonMapper;
 public class RabbitConfig {
 
     public static final String EXCHANGE = "transfers.exchange";
+    public static final String DLX = "transfers.dlx";
     public static final String Q_TRANSFER_REQUESTED = "q.transfer.requested";
+    public static final String Q_TRANSFER_REQUESTED_DLQ = "q.transfer.requested.dlq";
     public static final String RK_TRANSFER_REQUESTED = "transfer.requested";
     public static final String RK_TRANSFER_SETTLED = "transfer.settled";
     public static final String RK_TRANSFER_FAILED = "transfer.failed";
@@ -30,14 +32,33 @@ public class RabbitConfig {
     }
 
     @Bean
+    TopicExchange transfersDlx() {
+        return ExchangeBuilder.topicExchange(DLX).durable(true).build();
+    }
+
+    @Bean
     Queue transferRequestedQueue() {
-        // Durável. A DLX/DLQ e o retry entram na Etapa 8.
-        return QueueBuilder.durable(Q_TRANSFER_REQUESTED).build();
+        // x-dead-letter-exchange: mensagem rejeitada sem requeue (retry esgotado ou
+        // erro fatal de conversão) é reencaminhada à DLX com a routing key original.
+        return QueueBuilder.durable(Q_TRANSFER_REQUESTED)
+                .deadLetterExchange(DLX)
+                .build();
+    }
+
+    @Bean
+    Queue transferRequestedDlq() {
+        return QueueBuilder.durable(Q_TRANSFER_REQUESTED_DLQ).build();
     }
 
     @Bean
     Binding transferRequestedBinding(Queue transferRequestedQueue, TopicExchange transfersExchange) {
         return BindingBuilder.bind(transferRequestedQueue).to(transfersExchange).with(RK_TRANSFER_REQUESTED);
+    }
+
+    @Bean
+    Binding transferRequestedDlqBinding(Queue transferRequestedDlq, TopicExchange transfersDlx) {
+        // A DLX preserva a routing key original (transfer.requested).
+        return BindingBuilder.bind(transferRequestedDlq).to(transfersDlx).with(RK_TRANSFER_REQUESTED);
     }
 
     @Bean
