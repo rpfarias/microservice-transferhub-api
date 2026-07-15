@@ -1,0 +1,101 @@
+# Topologia local completa: 2 Postgres (um por bounded context), 1 RabbitMQ
+# com management UI e as 2 aplicações. Sobe tudo com: docker compose up --build
+#
+# depends_on com condition: service_healthy — as apps só iniciam quando a
+# infraestrutura está PRONTA (healthcheck verde), não apenas "iniciada".
+
+services:
+
+  postgres-transfer:
+    image: postgres:17-alpine
+    container_name: postgres-transfer
+    environment:
+      POSTGRES_DB: transferhub_transfer
+      POSTGRES_USER: transfer
+      POSTGRES_PASSWORD: transfer
+    ports:
+      - "5432:5432"
+    volumes:
+      - transfer-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U transfer -d transferhub_transfer"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  postgres-settlement:
+    image: postgres:17-alpine
+    container_name: postgres-settlement
+    environment:
+      POSTGRES_DB: transferhub_settlement
+      POSTGRES_USER: settlement
+      POSTGRES_PASSWORD: settlement
+    ports:
+      - "5433:5432"   # host 5433 para não colidir com o outro Postgres
+    volumes:
+      - settlement-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U settlement -d transferhub_settlement"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    container_name: rabbitmq
+    ports:
+      - "5672:5672"    # AMQP
+      - "15672:15672"  # Management UI (guest/guest)
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  transfer-api:
+    build: ./transfer-api
+    container_name: transfer-api
+    ports:
+      - "8080:8080"
+    environment:
+      DB_URL: jdbc:postgresql://postgres-transfer:5432/transferhub_transfer
+      DB_USERNAME: transfer
+      DB_PASSWORD: transfer
+      RABBITMQ_HOST: rabbitmq
+    depends_on:
+      postgres-transfer:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/actuator/health | grep -q UP"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  settlement-worker:
+    build: ./settlement-worker
+    container_name: settlement-worker
+    ports:
+      - "8081:8081"
+    environment:
+      DB_URL: jdbc:postgresql://postgres-settlement:5432/transferhub_settlement
+      DB_USERNAME: settlement
+      DB_PASSWORD: settlement
+      RABBITMQ_HOST: rabbitmq
+    depends_on:
+      postgres-settlement:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8081/actuator/health | grep -q UP"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+volumes:
+  transfer-data:
+  settlement-data:
