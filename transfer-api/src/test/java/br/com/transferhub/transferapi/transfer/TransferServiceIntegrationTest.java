@@ -12,6 +12,7 @@ import br.com.transferhub.transferapi.messaging.TransferSettled;
 import org.awaitility.Awaitility;
 import org.junit.jupiter.api.Test;
 import org.springframework.amqp.core.Binding;
+import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.BindingBuilder;
 import org.springframework.amqp.core.Queue;
 import org.springframework.amqp.core.TopicExchange;
@@ -21,6 +22,9 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
+
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.json.JsonMapper;
 
 import java.math.BigDecimal;
 import java.time.Duration;
@@ -70,6 +74,9 @@ class TransferServiceIntegrationTest {
 
     @Autowired
     Queue testRequestedQueue;
+
+    @Autowired
+    JsonMapper jsonMapper;
 
     private Account newAccount(String document, String balance) {
         Account account = new Account(document, "Titular " + document);
@@ -145,6 +152,32 @@ class TransferServiceIntegrationTest {
         assertThatExceptionOfType(SameAccountException.class)
                 .isThrownBy(() -> transferService.transfer(
                         "key-mesma", account.getId(), account.getId(), new BigDecimal("10.00")));
+    }
+
+    // ---------- Etapa 9: contrato de fio (wire contract) ----------
+
+    /**
+     * Pina os NOMES DOS CAMPOS do JSON publicado. O settlement-worker depende
+     * exatamente destas chaves (ele tem sua própria cópia do record). Se alguém
+     * renomear um campo aqui, este teste quebra ANTES de quebrar produção.
+     */
+    @Test
+    void contratoDeFio_transferRequested_temOsCamposEsperados() {
+        drenarFila();
+        Account source = newAccount("12121212121", "1000.00");
+        Account target = newAccount("21212121212", "0.00");
+
+        transferService.transfer("key-contrato", source.getId(), target.getId(), new BigDecimal("50.00"));
+
+        Message raw = rabbitTemplate.receive(testRequestedQueue.getName(), 5000);
+        assertThat(raw).isNotNull();
+        JsonNode json = jsonMapper.readTree(raw.getBody());
+        assertThat(json.has("transferId")).isTrue();
+        assertThat(json.has("sourceAccountId")).isTrue();
+        assertThat(json.has("targetAccountId")).isTrue();
+        assertThat(json.has("amount")).isTrue();
+        assertThat(json.has("occurredAt")).isTrue();
+        assertThat(json.size()).isEqualTo(5); // campo extra/renomeado = contrato quebrado
     }
 
     // ---------- Etapa 7: ciclo completo via broker (listeners reais) ----------
