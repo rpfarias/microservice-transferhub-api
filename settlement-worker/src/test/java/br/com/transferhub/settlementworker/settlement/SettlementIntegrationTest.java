@@ -22,6 +22,9 @@ import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
 
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.json.JsonMapper;
+
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.OffsetDateTime;
@@ -78,6 +81,9 @@ class SettlementIntegrationTest {
     SettlementService settlementService;
 
     @Autowired
+    JsonMapper jsonMapper;
+
+    @Autowired
     @Qualifier("testSettledQueue")
     Queue testSettledQueue;
 
@@ -103,6 +109,53 @@ class SettlementIntegrationTest {
         assertThat(((TransferSettled) out).transferId()).isEqualTo(transferId);
 
         assertThat(repository.existsByTransferId(transferId)).isTrue();
+    }
+
+    // ---------- Etapa 9: cenário de limite diário ACUMULADO ----------
+
+    @Test
+    void limiteDiarioAcumulado_rejeitaQuandoHistoricoMaisValorExcede() {
+        UUID targetId = UUID.randomUUID();
+        // Semeia o HISTÓRICO: 80.000 já liquidados para esta conta nas últimas 24h.
+        // É exatamente o dado que justifica o banco próprio do worker.
+        repository.save(SettlementRecord.settled(UUID.randomUUID(), targetId, new BigDecimal("80000.00")));
+
+        UUID transferId = UUID.randomUUID();
+        publish(transferId, targetId, "30000.00"); // 80.000 + 30.000 = 110.000 > 100.000
+
+        Object out = rabbitTemplate.receiveAndConvert(testFailedQueue.getName(), 10_000);
+        assertThat(out).isInstanceOf(TransferFailed.class);
+        assertThat(((TransferFailed) out).transferId()).isEqualTo(transferId);
+        assertThat(((TransferFailed) out).reason()).contains("Limite diario");
+    }
+
+    // ---------- Etapa 9: contrato de fio dos eventos publicados ----------
+
+    /**
+     * Pina os NOMES DOS CAMPOS dos JSONs publicados pelo worker — o transfer-api
+     * depende exatamente destas chaves (tem cópias próprias dos records).
+     */
+    @Test
+    void contratoDeFio_settledEFailed_temOsCamposEsperados() {
+        // TransferSettled
+        publish(UUID.randomUUID(), UUID.randomUUID(), "10000.00");
+        Message settledRaw = rabbitTemplate.receive(testSettledQueue.getName(), 10_000);
+        assertThat(settledRaw).isNotNull();
+        JsonNode settled = jsonMapper.readTree(settledRaw.getBody());
+        assertThat(settled.has("transferId")).isTrue();
+        assertThat(settled.has("settlementId")).isTrue();
+        assertThat(settled.has("occurredAt")).isTrue();
+        assertThat(settled.size()).isEqualTo(3);
+
+        // TransferFailed
+        publish(UUID.randomUUID(), UUID.randomUUID(), "60000.00"); // > 50k -> rejeita
+        Message failedRaw = rabbitTemplate.receive(testFailedQueue.getName(), 10_000);
+        assertThat(failedRaw).isNotNull();
+        JsonNode failed = jsonMapper.readTree(failedRaw.getBody());
+        assertThat(failed.has("transferId")).isTrue();
+        assertThat(failed.has("reason")).isTrue();
+        assertThat(failed.has("occurredAt")).isTrue();
+        assertThat(failed.size()).isEqualTo(3);
     }
 
     // ---------- Etapa 8: retry (falha técnica) e DLQ (mensagem venenosa) ----------
