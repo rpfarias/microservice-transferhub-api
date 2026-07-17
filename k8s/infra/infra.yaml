@@ -1,0 +1,108 @@
+# ============================================================================
+# INFRA DE DEMONSTRACAO LOCAL (kind/minikube) — NAO E PRODUCAO.
+# Postgres x2 e RabbitMQ como Deployments simples com emptyDir (dados somem
+# com o pod). Em producao: operador dedicado (CloudNativePG, RabbitMQ Cluster
+# Operator) ou servico gerenciado. Este arquivo existe para o namespace ser
+# auto-contido ao rodar os manifests de k8s/ localmente.
+# ============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-transfer
+  labels: { app: postgres-transfer, app.kubernetes.io/part-of: transferhub }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: postgres-transfer } }
+  template:
+    metadata: { labels: { app: postgres-transfer } }
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:17-alpine
+          ports: [ { containerPort: 5432 } ]
+          env:
+            - { name: POSTGRES_DB, value: transferhub_transfer }
+            - name: POSTGRES_USER
+              valueFrom: { secretKeyRef: { name: transferhub-secrets, key: TRANSFER_DB_USERNAME } }
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: transferhub-secrets, key: TRANSFER_DB_PASSWORD } }
+          volumeMounts: [ { name: data, mountPath: /var/lib/postgresql/data } ]
+          readinessProbe:
+            exec: { command: [ "pg_isready", "-U", "transfer", "-d", "transferhub_transfer" ] }
+            periodSeconds: 5
+      volumes: [ { name: data, emptyDir: {} } ]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-transfer
+spec:
+  selector: { app: postgres-transfer }
+  ports: [ { port: 5432, targetPort: 5432 } ]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-settlement
+  labels: { app: postgres-settlement, app.kubernetes.io/part-of: transferhub }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: postgres-settlement } }
+  template:
+    metadata: { labels: { app: postgres-settlement } }
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:17-alpine
+          ports: [ { containerPort: 5432 } ]
+          env:
+            - { name: POSTGRES_DB, value: transferhub_settlement }
+            - name: POSTGRES_USER
+              valueFrom: { secretKeyRef: { name: transferhub-secrets, key: SETTLEMENT_DB_USERNAME } }
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: transferhub-secrets, key: SETTLEMENT_DB_PASSWORD } }
+          volumeMounts: [ { name: data, mountPath: /var/lib/postgresql/data } ]
+          readinessProbe:
+            exec: { command: [ "pg_isready", "-U", "settlement", "-d", "transferhub_settlement" ] }
+            periodSeconds: 5
+      volumes: [ { name: data, emptyDir: {} } ]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-settlement
+spec:
+  selector: { app: postgres-settlement }
+  ports: [ { port: 5432, targetPort: 5432 } ]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rabbitmq
+  labels: { app: rabbitmq, app.kubernetes.io/part-of: transferhub }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: rabbitmq } }
+  template:
+    metadata: { labels: { app: rabbitmq } }
+    spec:
+      containers:
+        - name: rabbitmq
+          image: rabbitmq:4-management-alpine
+          ports:
+            - { containerPort: 5672 }   # AMQP
+            - { containerPort: 15672 }  # Management UI
+          readinessProbe:
+            exec: { command: [ "rabbitmq-diagnostics", "-q", "ping" ] }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq
+spec:
+  selector: { app: rabbitmq }
+  ports:
+    - { name: amqp, port: 5672, targetPort: 5672 }
+    - { name: management, port: 15672, targetPort: 15672 }

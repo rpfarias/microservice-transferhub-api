@@ -1,0 +1,13 @@
+# Configuracao NAO-sensivel dos dois servicos (hosts, URLs, nomes de banco).
+# Credenciais ficam no Secret — nunca aqui.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: transferhub-config
+  labels:
+    app.kubernetes.io/part-of: transferhub
+data:
+  RABBITMQ_HOST: rabbitmq
+  RABBITMQ_PORT: "5672"
+  TRANSFER_DB_URL: jdbc:postgresql://postgres-transfer:5432/transferhub_transfer
+  SETTLEMENT_DB_URL: jdbc:postgresql://postgres-settlement:5432/transferhub_settlement

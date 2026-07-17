@@ -1,0 +1,91 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: settlement-worker
+  labels:
+    app: settlement-worker
+    app.kubernetes.io/part-of: transferhub
+spec:
+  replicas: 1   # minimo; quem dita a escala real e o HPA
+  selector:
+    matchLabels:
+      app: settlement-worker
+  template:
+    metadata:
+      labels:
+        app: settlement-worker
+    spec:
+      containers:
+        - name: settlement-worker
+          # Em kind: kind load docker-image microservice-transferhub-settlement-worker:latest
+          image: microservice-transferhub-settlement-worker:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8081
+          env:
+            - name: DB_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: transferhub-config
+                  key: SETTLEMENT_DB_URL
+            - name: DB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: transferhub-secrets
+                  key: SETTLEMENT_DB_USERNAME
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: transferhub-secrets
+                  key: SETTLEMENT_DB_PASSWORD
+            - name: RABBITMQ_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: transferhub-config
+                  key: RABBITMQ_HOST
+            - name: RABBITMQ_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: transferhub-secrets
+                  key: RABBITMQ_USERNAME
+            - name: RABBITMQ_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: transferhub-secrets
+                  key: RABBITMQ_PASSWORD
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 768Mi
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8081
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8081
+            initialDelaySeconds: 20
+            periodSeconds: 5
+            failureThreshold: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: settlement-worker
+  labels:
+    app: settlement-worker
+    app.kubernetes.io/part-of: transferhub
+spec:
+  type: ClusterIP
+  selector:
+    app: settlement-worker
+  ports:
+    - port: 8081
+      targetPort: 8081
