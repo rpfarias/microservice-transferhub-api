@@ -1,0 +1,30 @@
+# HPA no WORKER (e nao na API): consumo de fila e trabalho paralelizavel —
+# mais pods = mais consumers na MESMA fila; o RabbitMQ distribui as mensagens.
+# A idempotencia do consumer (transfer_id UNIQUE) garante que a concorrencia
+# entre replicas nao duplica liquidacao.
+#
+# HONESTIDADE TECNICA: escala por CPU e um proxy imperfeito para backlog de
+# fila. A metrica correta seria profundidade da fila (KEDA com trigger
+# rabbitmq) — documentado como evolucao no README. CPU e suficiente para
+# demonstrar o mecanismo em ambiente local (requer metrics-server no cluster).
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: settlement-worker
+  labels:
+    app: settlement-worker
+    app.kubernetes.io/part-of: transferhub
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: settlement-worker
+  minReplicas: 1
+  maxReplicas: 5
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70

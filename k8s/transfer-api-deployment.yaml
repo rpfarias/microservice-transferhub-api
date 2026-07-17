@@ -1,0 +1,98 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: transfer-api
+  labels:
+    app: transfer-api
+    app.kubernetes.io/part-of: transferhub
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: transfer-api
+  template:
+    metadata:
+      labels:
+        app: transfer-api
+    spec:
+      containers:
+        - name: transfer-api
+          # Imagem construida pelo docker compose build. Em kind:
+          #   kind load docker-image microservice-transferhub-transfer-api:latest
+          # Apos a Etapa 13 (CI), pode-se trocar pela imagem do GHCR.
+          image: microservice-transferhub-transfer-api:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          env:
+            - name: DB_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: transferhub-config
+                  key: TRANSFER_DB_URL
+            - name: DB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: transferhub-secrets
+                  key: TRANSFER_DB_USERNAME
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: transferhub-secrets
+                  key: TRANSFER_DB_PASSWORD
+            - name: RABBITMQ_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: transferhub-config
+                  key: RABBITMQ_HOST
+            - name: RABBITMQ_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: transferhub-secrets
+                  key: RABBITMQ_USERNAME
+            - name: RABBITMQ_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: transferhub-secrets
+                  key: RABBITMQ_PASSWORD
+          # requests/limits: sem requests o HPA por CPU% nao tem base de calculo.
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 768Mi
+          # LIVENESS: processo vivo? Falhou -> RESTART. Nunca inclui banco/broker.
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 3
+          # READINESS: pronto para trafego? (inclui db+rabbit) Falhou -> sai do
+          # balanceador, SEM restart. Dependencia externa caiu != processo doente.
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 5
+            failureThreshold: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: transfer-api
+  labels:
+    app: transfer-api
+    app.kubernetes.io/part-of: transferhub
+spec:
+  type: ClusterIP
+  selector:
+    app: transfer-api
+  ports:
+    - port: 8080
+      targetPort: 8080
+# Acesso local: kubectl port-forward svc/transfer-api 8080:8080
